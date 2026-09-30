@@ -59,10 +59,16 @@ describe('watching the engine feed', () => {
   const base = 'http://10.0.0.5:3457'
   let fetchMock: ReturnType<typeof vi.fn>
 
-  function feedResponse(events: { ts: number; id: string }[]): void {
+  /** The bridge answers with a `Date` header — the phone reads server time from it, not its own clock. */
+  function feedResponse(events: { ts: number; id: string }[], serverNowSec?: number): void {
+    const date = new Date((serverNowSec ?? Date.now() / 1000) * 1000).toUTCString()
     fetchMock.mockImplementation(async (url: string) =>
       String(url).includes('/api/feed')
-        ? { ok: true, json: async () => ({ events }) }
+        ? {
+            ok: true,
+            headers: { get: (name: string) => (name === 'date' ? date : null) },
+            json: async () => ({ events })
+          }
         : { ok: false }
     )
   }
@@ -79,14 +85,24 @@ describe('watching the engine feed', () => {
     playAudioUrl.mockReset()
   })
 
-  it('leaves what was said before this screen alone', async () => {
-    const before = Date.now() / 1000 - 3600
-    feedResponse([{ ts: before, id: 'yesterday' }])
+  it('leaves what was said long ago alone', async () => {
+    const stale = Date.now() / 1000 - 3600
+    feedResponse([{ ts: stale, id: 'yesterday' }])
     const onEvent = vi.fn()
     const watcher = startFeedWatcher(base, onEvent)
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
     watcher.stop()
     expect(onEvent).not.toHaveBeenCalled()
+  })
+
+  it('catches up on the answer already on screen when the speaker is switched on', async () => {
+    const now = Date.now() / 1000
+    const current = { ts: now - 10, id: 'on-screen' }
+    feedResponse([current], now)
+    const onEvent = vi.fn()
+    const watcher = startFeedWatcher(base, onEvent)
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(current))
+    watcher.stop()
   })
 
   it('plays what lands after the cursor', async () => {
@@ -96,6 +112,23 @@ describe('watching the engine feed', () => {
     const watcher = startFeedWatcher(base, onEvent)
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(fresh))
     watcher.stop()
+  })
+
+  it('drops the hours of backlog a closed pocket collected', async () => {
+    const now = Date.now() / 1000
+    feedResponse(
+      [
+        { ts: now - 7200, id: 'old-a' },
+        { ts: now - 3600, id: 'old-b' },
+        { ts: now - 5, id: 'now-c' }
+      ],
+      now
+    )
+    const onEvent = vi.fn()
+    const watcher = startFeedWatcher(base, onEvent)
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
+    watcher.stop()
+    expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual(['now-c'])
   })
 
   it('reads the whole feed back for the last utterance', async () => {

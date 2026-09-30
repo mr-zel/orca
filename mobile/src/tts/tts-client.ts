@@ -5,6 +5,12 @@ export const VOICE_BRIDGE_PORT = 3457
 
 const FEED_POLL_MS = 2500
 const FETCH_TIMEOUT_MS = 5000
+/**
+ * How old a line may be and still be worth speaking. The engine keeps a rolling feed of
+ * everything every agent said, so a poll after a pocket-full of dead time returns dozens of
+ * lines from yesterday — read all of them and the phone talks for hours about nothing.
+ */
+const FRESH_EVENT_SEC = 120
 
 export type TtsFeedEvent = { ts: number; id?: string; client?: string; text?: string }
 
@@ -34,19 +40,52 @@ export function voiceBaseUrl(
 }
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T | null> {
+  const response = await fetchWithTimeout(url, init)
+  if (!response || !response.ok) {
+    return null
+  }
+  try {
+    return (await response.json()) as T
+  } catch {
+    return null
+  }
+}
+
+async function fetchWithTimeout(url: string, init?: RequestInit): Promise<Response | null> {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
   try {
-    const response = await fetch(url, { ...init, signal: controller.signal, cache: 'no-store' })
-    if (!response.ok) {
-      return null
-    }
-    return (await response.json()) as T
+    return await fetch(url, { ...init, signal: controller.signal, cache: 'no-store' })
   } catch {
     return null
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * Лента движка вместе с событиями отдаёт и дату ответа (`Date` заголовком) — по ней и
+ * сверяемся: часы телефона и ПК гуляют на минуты, и «свежесть» по локальному времени
+ * либо съедает текущий ответ, либо выдаёт вчерашний.
+ */
+async function fetchFeed(
+  base: string,
+  since: number
+): Promise<{ events: TtsFeedEvent[]; serverNow: number | null }> {
+  const response = await fetchWithTimeout(`${base}/api/feed?since=${since}`)
+  if (!response || !response.ok) {
+    return { events: [], serverNow: null }
+  }
+  let events: TtsFeedEvent[] = []
+  try {
+    const body = (await response.json()) as { events?: TtsFeedEvent[] }
+    events = Array.isArray(body?.events) ? body.events : []
+  } catch {
+    events = []
+  }
+  const dateHeader = response.headers?.get?.('date')
+  const parsed = dateHeader ? Date.parse(dateHeader) : Number.NaN
+  return { events, serverNow: Number.isFinite(parsed) ? parsed / 1000 : null }
 }
 
 // Почему очередь: каждый новый вызов движка обрывает предыдущий (MediaPlayer один), а
@@ -75,7 +114,7 @@ async function playWav(base: string, id: string): Promise<boolean> {
 export function playLast(base: string): Promise<boolean> {
   return enqueue(async () => {
     const feed = await fetchJson<{ events?: TtsFeedEvent[] }>(`${base}/api/feed?since=0`)
-    const last = feed?.events?.slice(-1)[0]
+    const last = feed?.events?.at(-1)
     return last?.id ? playWav(base, last.id) : false
   })
 }
@@ -85,16 +124,44 @@ export type TtsFeedWatcher = { stop: () => void }
 /**
  * Автоплей: подписка на ленту движка опросом. SSE (`/api/live`) тут не берём — он держит
  * сокет, а телефону в кармане он всё равно рвётся; опрос раз в 2.5 с переживает засыпание
- * экрана без «мёртвых» подписок. Курсор стартует с «сейчас», чтобы при включении не
- * проигрывать вчерашние фразы.
+ * экрана без «мёртвых» подписок.
+ *
+ * При включении догоняем ровно хвост: последние строки не старше FRESH_EVENT_SEC. Иначе
+ * получалось либо «молчу, хотя ответ уже на экране» (курсор ставился в «сейчас» по часам
+ * телефона), либо «часы назад включил — читает вчерашнее» (курсор по `since=0`).
  */
 export function startFeedWatcher(
   base: string,
   onEvent: (event: TtsFeedEvent) => void
 ): TtsFeedWatcher {
-  let cursor = Date.now() / 1000
+  let cursor = 0
   let stopped = false
   let ticking = false
+  let seeded = false
+
+  const fresh = (event: TtsFeedEvent, serverNow: number | null): boolean => {
+    if (!event.id) {
+      return false
+    }
+    return serverNow === null || event.ts > serverNow - FRESH_EVENT_SEC
+  }
+
+  const seed = async (): Promise<void> => {
+    const { events, serverNow } = await fetchFeed(base, 0)
+    if (stopped) {
+      return
+    }
+    cursor = serverNow ?? Date.now() / 1000
+    for (const event of events) {
+      if (event.ts > cursor) {
+        cursor = event.ts
+      }
+      if (fresh(event, serverNow)) {
+        onEvent(event)
+      }
+    }
+    seeded = true
+  }
 
   const tick = async () => {
     if (stopped || ticking) {
@@ -102,12 +169,16 @@ export function startFeedWatcher(
     }
     ticking = true
     try {
-      const feed = await fetchJson<{ events?: TtsFeedEvent[] }>(`${base}/api/feed?since=${cursor}`)
-      for (const event of feed?.events ?? []) {
+      if (!seeded) {
+        await seed()
+        return
+      }
+      const { events, serverNow } = await fetchFeed(base, cursor)
+      for (const event of events) {
         if (event.ts > cursor) {
           cursor = event.ts
         }
-        if (event.id) {
+        if (fresh(event, serverNow)) {
           onEvent(event)
         }
       }
