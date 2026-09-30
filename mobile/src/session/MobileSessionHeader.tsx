@@ -95,9 +95,7 @@ export function MobileSessionHeader({ controller }: { controller: MobileSessionC
             </Text>
           </Pressable>
         </View>
-        {!isFloatingWorkspaceRoute && (
-          <MobileSessionTtsButton hostId={hostId} />
-        )}
+        {!isFloatingWorkspaceRoute && <MobileSessionTtsButton hostId={hostId} />}
         {!isFloatingWorkspaceRoute && (
           <MobileSessionHeaderIconButton
             active={activePanel === 'files'}

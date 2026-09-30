@@ -56,7 +56,9 @@ export async function loadTtsBaseUrlOverride(): Promise<string | null> {
 
 export function saveTtsBaseUrlOverride(url: string | null): Promise<void> {
   const write = (ttsWriteBarrier ?? Promise.resolve()).then(() =>
-    url ? persistMirrored(TTS_BASE_URL_KEY, url.replace(/\/+$/, '')) : AsyncStorage.removeItem(TTS_BASE_URL_KEY)
+    url
+      ? persistMirrored(TTS_BASE_URL_KEY, url.replace(/\/+$/, ''))
+      : AsyncStorage.removeItem(TTS_BASE_URL_KEY)
   )
   const barrier = write.then(() => undefined).catch(() => undefined)
   ttsWriteBarrier = barrier

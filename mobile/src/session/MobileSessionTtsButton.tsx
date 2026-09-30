@@ -3,7 +3,13 @@ import { Volume2, VolumeX } from 'lucide-react-native'
 import { MobileSessionHeaderIconButton } from './MobileSessionHeaderIconButton'
 import { loadTtsBaseUrlOverride, loadTtsMode, saveTtsMode } from '../storage/tts-preferences'
 import { loadHosts } from '../transport/host-store'
-import { playLast, playWavById, startFeedWatcher, stopPlayback, voiceBaseUrl } from '../tts/tts-client'
+import {
+  playLast,
+  playWavById,
+  startFeedWatcher,
+  stopPlayback,
+  voiceBaseUrl
+} from '../tts/tts-client'
 import type { TtsFeedWatcher } from '../tts/tts-client'
 import { triggerMediumImpact } from '../platform/haptics'
 import type { MobileTtsMode } from '../storage/tts-preferences'
@@ -13,11 +19,7 @@ import type { MobileTtsMode } from '../storage/tts-preferences'
  * тап = выкл/вкл автоплея (перечёркнутый динамик = выкл);
  * долгое нажатие = «я пропустил, прочитай последнее».
  */
-export function MobileSessionTtsButton({
-  hostId
-}: {
-  hostId: string | null | undefined
-}) {
+export function MobileSessionTtsButton({ hostId }: { hostId: string | null | undefined }) {
   const [mode, setMode] = useState<MobileTtsMode>('off')
   const [base, setBase] = useState<string | null>(null)
   const watcherRef = useRef<TtsFeedWatcher | null>(null)

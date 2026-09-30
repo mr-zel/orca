@@ -13,7 +13,10 @@ export type TtsFeedEvent = { ts: number; id?: string; client?: string; text?: st
  * → `http://192.168.68.10:3457`): телефон уже знает машину, второго адреса заводить не нужно.
  * Разбираем регуляркой, а не `new URL()` — в Hermes глобальный URL не гарантирован.
  */
-export function voiceBaseUrl(endpoint: string | null | undefined, override: string | null): string | null {
+export function voiceBaseUrl(
+  endpoint: string | null | undefined,
+  override: string | null
+): string | null {
   const trimmed = (override ?? '').replace(/\/+$/, '')
   if (/^https?:\/\//.test(trimmed)) {
     return trimmed
@@ -85,7 +88,10 @@ export type TtsFeedWatcher = { stop: () => void }
  * экрана без «мёртвых» подписок. Курсор стартует с «сейчас», чтобы при включении не
  * проигрывать вчерашние фразы.
  */
-export function startFeedWatcher(base: string, onEvent: (event: TtsFeedEvent) => void): TtsFeedWatcher {
+export function startFeedWatcher(
+  base: string,
+  onEvent: (event: TtsFeedEvent) => void
+): TtsFeedWatcher {
   let cursor = Date.now() / 1000
   let stopped = false
   let ticking = false
