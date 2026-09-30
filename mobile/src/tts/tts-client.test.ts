@@ -246,3 +246,165 @@ describe('one message at a time', () => {
     expect(stopAudio).toHaveBeenCalled()
   })
 })
+
+describe('playback modes from the feed', () => {
+  const base = 'http://10.0.0.5:3457'
+  let fetchMock: ReturnType<typeof vi.fn>
+  let releases: (() => void)[]
+
+  /**
+   * One scripted answer per poll: events, the playback mode and the engine clock the
+   * `Date` header carries. Every playAudioUrl call parks until the test releases it,
+   * so «sounding» is exactly what the test says is sounding.
+   */
+  function script(steps: { events?: { ts: number; id: string }[]; mode?: string; now: number }[]) {
+    let call = 0
+    fetchMock.mockImplementation(async () => {
+      const step = steps[Math.min(call, steps.length - 1)]
+      call += 1
+      const date = new Date(step.now * 1000).toUTCString()
+      return {
+        ok: true,
+        headers: { get: (name: string) => (name === 'date' ? date : null) },
+        json: async () => ({ events: step.events ?? [], mode: step.mode })
+      }
+    })
+  }
+
+  beforeEach(() => {
+    fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+    vi.useFakeTimers()
+    releases = []
+    playAudioUrl.mockImplementation(
+      () =>
+        new Promise<boolean>((resolve) => {
+          releases.push(() => resolve(true))
+        })
+    )
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    playAudioUrl.mockReset()
+  })
+
+  const played = () => playAudioUrl.mock.calls.map((call) => String(call[0]).split('id=')[1])
+
+  async function run(timesSec: number) {
+    await vi.advanceTimersByTimeAsync(timesSec * 1000)
+  }
+
+  it('queue: sounds everything that piled up, one after another', async () => {
+    const t0 = Date.now() / 1000
+    script([
+      { now: t0 },
+      {
+        now: t0 + 10,
+        mode: 'queue',
+        events: [
+          { ts: t0 + 5, id: 'a' },
+          { ts: t0 + 8, id: 'b' }
+        ]
+      },
+      { now: t0 + 12, mode: 'queue' }
+    ])
+    const watcher = startFeedWatcher(base, () => {})
+    await run(3)
+    // «a» звучит, «b» ждёт за ним — очередь в этом режиме и есть смысл.
+    expect(played()).toEqual(['a'])
+    releases[0]?.()
+    await run(1)
+    expect(played()).toEqual(['a', 'b'])
+    releases[1]?.()
+    watcher.stop()
+  })
+
+  it('hold: finishes what sounded, then reads only the newest of the waiters', async () => {
+    const t0 = Date.now() / 1000
+    script([
+      { now: t0 },
+      { now: t0 + 10, mode: 'hold', events: [{ ts: t0 + 5, id: 'a' }] },
+      {
+        now: t0 + 12,
+        mode: 'hold',
+        events: [
+          { ts: t0 + 11, id: 'middle' },
+          { ts: t0 + 11.5, id: 'last' }
+        ]
+      },
+      { now: t0 + 20, mode: 'hold' }
+    ])
+    const watcher = startFeedWatcher(base, () => {})
+    await run(6)
+    expect(played()).toEqual(['a'])
+    releases[0]?.()
+    await run(1)
+    // «middle» прилетел, пока звучал «a», и был выброшен: досказываем последнее.
+    expect(played()).toEqual(['a', 'last'])
+    releases[1]?.()
+    watcher.stop()
+  })
+
+  it('final: keeps quiet while answers pour in, reads the last one after the silence', async () => {
+    const t0 = Date.now() / 1000
+    script([
+      { now: t0 },
+      { now: t0 + 10, mode: 'final', events: [{ ts: t0 + 9, id: 'draft' }] },
+      { now: t0 + 12, mode: 'final', events: [{ ts: t0 + 11, id: 'revised' }] },
+      { now: t0 + 16, mode: 'final' },
+      { now: t0 + 22, mode: 'final' },
+      { now: t0 + 30, mode: 'final' }
+    ])
+    const watcher = startFeedWatcher(base, () => {})
+    await run(8)
+    // Всё это время агент ещё строчит (тишина от последней строки < 15 с) — телефон молчит.
+    expect(played()).toEqual([])
+    await run(10)
+    // Тишина дольше порога — играем ровно последнюю строку, «draft» не вспоминаем.
+    expect(played()).toEqual(['revised'])
+    releases[0]?.()
+    watcher.stop()
+  })
+
+  it('a mode switch drops the old schedule, the sounding piece finishes as it is', async () => {
+    const t0 = Date.now() / 1000
+    script([
+      { now: t0 },
+      {
+        now: t0 + 10,
+        mode: 'queue',
+        events: [
+          { ts: t0 + 5, id: 'a' },
+          { ts: t0 + 8, id: 'b' }
+        ]
+      },
+      { now: t0 + 12, mode: 'interrupt' }
+    ])
+    const watcher = startFeedWatcher(base, () => {})
+    await run(6)
+    expect(played()).toEqual(['a'])
+    releases[0]?.()
+    await run(1)
+    // Режим сменили: «b» ждал в очереди очереди, а ей больше не жить.
+    expect(played()).toEqual(['a'])
+    watcher.stop()
+  })
+
+  it('interrupt mode cuts the sounding piece for the newest one', async () => {
+    const t0 = Date.now() / 1000
+    script([
+      { now: t0 },
+      { now: t0 + 10, mode: 'interrupt', events: [{ ts: t0 + 5, id: 'a' }] },
+      { now: t0 + 12, mode: 'interrupt', events: [{ ts: t0 + 11, id: 'b' }] }
+    ])
+    const watcher = startFeedWatcher(base, () => {})
+    await run(1)
+    await run(4)
+    // Не дожидаясь конца «a»: новое событие сразу идёт в плеер.
+    expect(played()).toEqual(['a', 'b'])
+    releases.forEach((release) => release())
+    watcher.stop()
+  })
+})

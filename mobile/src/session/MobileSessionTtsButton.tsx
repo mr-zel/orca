@@ -3,13 +3,7 @@ import { Volume2, VolumeX } from 'lucide-react-native'
 import { MobileSessionHeaderIconButton } from './MobileSessionHeaderIconButton'
 import { loadTtsBaseUrlOverride, loadTtsMode, saveTtsMode } from '../storage/tts-preferences'
 import { loadHosts } from '../transport/host-store'
-import {
-  playLast,
-  playWavById,
-  startFeedWatcher,
-  stopPlayback,
-  voiceBaseUrl
-} from '../tts/tts-client'
+import { playLast, startFeedWatcher, stopPlayback, voiceBaseUrl } from '../tts/tts-client'
 import type { TtsFeedWatcher } from '../tts/tts-client'
 import { triggerMediumImpact } from '../platform/haptics'
 import type { MobileTtsMode } from '../storage/tts-preferences'
@@ -45,18 +39,18 @@ export function MobileSessionTtsButton({ hostId }: { hostId: string | null | und
   }, [hostId])
 
   // Подписка живёт ровно столько, сколько включён автоплей: с выключенным тумблером
-  // опрос ленты не идёт и телефон не держит сеть.
+  // опрос ленты не идёт и телефон не держит сеть. Воспроизведением заведует сам
+  // вотчер — режим (обрыв/очередь/дождай/только-финал) приходит с ленты и меняется
+  // без перезапуска приложения.
   useEffect(() => {
     watcherRef.current?.stop()
     watcherRef.current = null
     if (mode !== 'on' || !base) {
-      // Перечёркнутый динамик = тишина здесь и сейчас, а не «договорить очередь».
+      // Перечёркнутый динамик = тишина здесь и сейчас, в любом режиме.
       stopPlayback()
       return
     }
-    watcherRef.current = startFeedWatcher(base, (event) => {
-      void playWavById(base, event.id as string)
-    })
+    watcherRef.current = startFeedWatcher(base, () => {})
     return () => {
       watcherRef.current?.stop()
       watcherRef.current = null

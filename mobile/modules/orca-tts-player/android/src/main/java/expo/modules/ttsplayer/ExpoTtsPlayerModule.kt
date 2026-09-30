@@ -9,9 +9,10 @@ import expo.modules.kotlin.modules.ModuleDefinition
 // Почему отдельный модуль, а не playPCMData из @orca/expo-two-way-audio: тот движок
 // играет строго 16 кГц моно PCM, а наш TTS-движок отдаёт WAV другой частоты — без
 // ресемплинга голос едет по темпу. MediaPlayer ест WAV/MP3 по URL как есть.
-// USAGE_NOTIFICATION: речь агента — это уведомление, а не музыка. Беззвучный режим и
-// «не беспокоить» её глушат (по слову оператора: «пусть глушит беззвучный»), и чужой
-// фокус аудио она не требует.
+// USAGE_ALARM: по слову оператора (30.09, вечер) «в беззвучном режиме сделай чтоб звук
+// был у приложения» — будильничный поток обходит беззвучный режим; громкость — ползунок
+// «Будильник». Тап по перечёркнутому динамику при этом глушит по-прежнему: мы его не
+// через громкость останавливаем, а снимая воспроизведение.
 class ExpoTtsPlayerModule : Module() {
   private var player: MediaPlayer? = null
   private var pending: Promise? = null
@@ -32,7 +33,7 @@ class ExpoTtsPlayerModule : Module() {
       try {
         mp.setAudioAttributes(
           AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+            .setUsage(AudioAttributes.USAGE_ALARM)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
             .build()
         )
