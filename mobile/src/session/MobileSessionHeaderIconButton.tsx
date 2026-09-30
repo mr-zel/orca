@@ -14,13 +14,16 @@ type MobileSessionHeaderIconButtonProps = {
   accessibilityLabel: string
   icon: ComponentType<HeaderIconProps>
   onPress: () => void
+  /** Второе действие на той же кнопке — шапка узкая, а режимов у динамика два. */
+  onLongPress?: () => void
 }
 
 export function MobileSessionHeaderIconButton({
   active = false,
   accessibilityLabel,
   icon: Icon,
-  onPress
+  onPress,
+  onLongPress
 }: MobileSessionHeaderIconButtonProps) {
   return (
     <Pressable
@@ -30,6 +33,7 @@ export function MobileSessionHeaderIconButton({
         active && styles.filesButtonActive
       ]}
       onPress={onPress}
+      onLongPress={onLongPress}
       hitSlop={8}
       accessibilityLabel={accessibilityLabel}
     >

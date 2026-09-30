@@ -11,6 +11,7 @@ import {
   Plus
 } from 'lucide-react-native'
 import { MobileSessionHeaderIconButton } from './MobileSessionHeaderIconButton'
+import { MobileSessionTtsButton } from './MobileSessionTtsButton'
 import { triggerMediumImpact } from '../platform/haptics'
 import { StatusDot } from '../components/StatusDot'
 import { MobileAgentIcon } from '../components/MobileAgentIcon'
@@ -94,6 +95,9 @@ export function MobileSessionHeader({ controller }: { controller: MobileSessionC
             </Text>
           </Pressable>
         </View>
+        {!isFloatingWorkspaceRoute && (
+          <MobileSessionTtsButton hostId={hostId} />
+        )}
         {!isFloatingWorkspaceRoute && (
           <MobileSessionHeaderIconButton
             active={activePanel === 'files'}
