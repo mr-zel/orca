@@ -6,11 +6,11 @@ export const VOICE_BRIDGE_PORT = 3457
 const FEED_POLL_MS = 2500
 const FETCH_TIMEOUT_MS = 5000
 /**
- * How old a line may be and still be worth speaking. The engine keeps a rolling feed of
- * everything every agent said, so a poll after a pocket-full of dead time returns dozens of
- * lines from yesterday — read all of them and the phone talks for hours about nothing.
+ * Единственное ограничение по возрасту — насколько далеко назад заглядывать при
+ * *включении* динамика. Дальше телефон играет всё, что движок выдал после курсора,
+ * без цензуры: длину и скорость решает движок.
  */
-const FRESH_EVENT_SEC = 120
+const CATCH_UP_SEC = 300
 
 export type TtsFeedEvent = { ts: number; id?: string; client?: string; text?: string }
 
@@ -126,9 +126,10 @@ export type TtsFeedWatcher = { stop: () => void }
  * сокет, а телефону в кармане он всё равно рвётся; опрос раз в 2.5 с переживает засыпание
  * экрана без «мёртвых» подписок.
  *
- * При включении догоняем ровно хвост: последние строки не старше FRESH_EVENT_SEC. Иначе
- * получалось либо «молчу, хотя ответ уже на экране» (курсор ставился в «сейчас» по часам
- * телефона), либо «часы назад включил — читает вчерашнее» (курсор по `since=0`).
+ * Всё, что вышло после курсора, играется БЕЗ условий — движок сам решает, что и когда
+ * произносить, и резать его права нет. Ограничение по возрасту только одно: при
+ * *включении* динамика догоняем не всю ленту (иначе телефон начал бы читать вчерашнее),
+ * а самый свежий хвост — не старше CATCH_UP_SEC.
  */
 export function startFeedWatcher(
   base: string,
@@ -139,11 +140,10 @@ export function startFeedWatcher(
   let ticking = false
   let seeded = false
 
-  const fresh = (event: TtsFeedEvent, serverNow: number | null): boolean => {
-    if (!event.id) {
-      return false
+  const play = (event: TtsFeedEvent): void => {
+    if (event.id) {
+      onEvent(event)
     }
-    return serverNow === null || event.ts > serverNow - FRESH_EVENT_SEC
   }
 
   const seed = async (): Promise<void> => {
@@ -152,12 +152,13 @@ export function startFeedWatcher(
       return
     }
     cursor = serverNow ?? Date.now() / 1000
+    const cutoff = cursor - CATCH_UP_SEC
     for (const event of events) {
       if (event.ts > cursor) {
         cursor = event.ts
       }
-      if (fresh(event, serverNow)) {
-        onEvent(event)
+      if (event.ts > cutoff) {
+        play(event)
       }
     }
     seeded = true
@@ -173,14 +174,12 @@ export function startFeedWatcher(
         await seed()
         return
       }
-      const { events, serverNow } = await fetchFeed(base, cursor)
+      const { events } = await fetchFeed(base, cursor)
       for (const event of events) {
         if (event.ts > cursor) {
           cursor = event.ts
         }
-        if (fresh(event, serverNow)) {
-          onEvent(event)
-        }
+        play(event)
       }
     } finally {
       ticking = false

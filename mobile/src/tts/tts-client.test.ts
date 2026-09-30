@@ -114,7 +114,7 @@ describe('watching the engine feed', () => {
     watcher.stop()
   })
 
-  it('drops the hours of backlog a closed pocket collected', async () => {
+  it('catches up only the fresh tail when the speaker is switched on', async () => {
     const now = Date.now() / 1000
     feedResponse(
       [
@@ -129,6 +129,43 @@ describe('watching the engine feed', () => {
     await vi.waitFor(() => expect(onEvent).toHaveBeenCalled())
     watcher.stop()
     expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual(['now-c'])
+  })
+
+  it('plays every line the engine sends, however long the pocket was shut', async () => {
+    // Nothing is dropped after the cursor: the engine decides what to say, the phone only
+    // refuses to reread history from before it was switched on.
+    const t0 = Date.now() / 1000
+    const backlog = [
+      { ts: t0 + 60, id: 'while-asleep-a' },
+      { ts: t0 + 1800, id: 'while-asleep-b' }
+    ]
+    let calls = 0
+    fetchMock.mockImplementation(async (url: string) => {
+      if (!String(url).includes('/api/feed')) {
+        return { ok: false }
+      }
+      calls += 1
+      // Первый ответ — разметка ленты при включении (часы движка = t0), второй — опрос
+      // после получаса в кармане: обе строки вышли позже курсора, значит обе играем.
+      const nowSec = calls === 1 ? t0 : t0 + 3600
+      const events = calls === 1 ? [] : backlog
+      const date = new Date(nowSec * 1000).toUTCString()
+      return {
+        ok: true,
+        headers: { get: (name: string) => (name === 'date' ? date : null) },
+        json: async () => ({ events })
+      }
+    })
+    const onEvent = vi.fn()
+    const watcher = startFeedWatcher(base, onEvent)
+    await vi.waitFor(() => expect(calls).toBe(1))
+    await vi.advanceTimersByTimeAsync(3000)
+    await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+    watcher.stop()
+    expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual([
+      'while-asleep-a',
+      'while-asleep-b'
+    ])
   })
 
   it('reads the whole feed back for the last utterance', async () => {
