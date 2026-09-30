@@ -88,30 +88,15 @@ async function fetchFeed(
   return { events, serverNow: Number.isFinite(parsed) ? parsed / 1000 : null }
 }
 
-// Почему очередь: каждый новый вызов движка обрывает предыдущий (MediaPlayer один), а
-// ответы приходят подряд кусками — без серии по очереди голос сам себя перебивает.
-let queue: Promise<unknown> = Promise.resolve()
-
-// Номер серии. Тап по перечёркнутому динамику поднимает его — и всё, что ещё не
-// успело начаться, уже не начнётся. Без этого выключенный телефон «договаривает»
-// очередь: движок нарезает длинный ответ на куски по 600 символов, и каждый кусок —
-// отдельное событие ленты, уже стоящее в очереди.
-let series = 0
-
-function enqueue(task: () => Promise<boolean>): Promise<boolean> {
-  const mine = series
-  const guarded = (): Promise<boolean> => (mine === series ? task() : Promise.resolve(false))
-  const run = queue.then(guarded, guarded)
-  queue = run.then(
-    () => undefined,
-    () => undefined
-  )
-  return run
-}
+// Очереди нет по смыслу: телефон обязан говорить ПОСЛЕДНЕЕ сообщение, а не всё, что
+// накопилось, пока он лежал в кармане. Каждое новое обрывает предыдущее — native `play`
+// сам релизит плеер, а из одного опроса ленты берётся только самая свежая строка.
+// Старая очередь и была причиной «не выключается»: выстрел по перечёркнутому динамику
+// гасил только звучащее, а то, что стояло за ним, играло дальше.
 
 /** Сыграть уже готовый синтез по его id — движок кэширует WAV, повторного синтеза нет. */
 export function playWavById(base: string, id: string): Promise<boolean> {
-  return enqueue(() => playWav(base, id))
+  return playWav(base, id)
 }
 
 async function playWav(base: string, id: string): Promise<boolean> {
@@ -119,12 +104,21 @@ async function playWav(base: string, id: string): Promise<boolean> {
 }
 
 /** Озвучить последнее высказывание в ленте движка — «я пропустил, прочитай». */
-export function playLast(base: string): Promise<boolean> {
-  return enqueue(async () => {
-    const feed = await fetchJson<{ events?: TtsFeedEvent[] }>(`${base}/api/feed?since=0`)
-    const last = feed?.events?.at(-1)
-    return last?.id ? playWav(base, last.id) : false
-  })
+export async function playLast(base: string): Promise<boolean> {
+  const feed = await fetchJson<{ events?: TtsFeedEvent[] }>(`${base}/api/feed?since=0`)
+  const last = newestWithId(feed?.events ?? [])
+  return last?.id ? playWav(base, last.id) : false
+}
+
+/** Последняя озвучка ленты: у движка события идут в порядке появления. */
+function newestWithId(events: TtsFeedEvent[]): TtsFeedEvent | null {
+  let newest: TtsFeedEvent | null = null
+  for (const event of events) {
+    if (event.id) {
+      newest = event
+    }
+  }
+  return newest
 }
 
 export type TtsFeedWatcher = { stop: () => void }
@@ -134,10 +128,13 @@ export type TtsFeedWatcher = { stop: () => void }
  * сокет, а телефону в кармане он всё равно рвётся; опрос раз в 2.5 с переживает засыпание
  * экрана без «мёртвых» подписок.
  *
- * Всё, что вышло после курсора, играется БЕЗ условий — движок сам решает, что и когда
- * произносить, и резать его права нет. Ограничение по возрасту только одно: при
- * *включении* динамика догоняем не всю ленту (иначе телефон начал бы читать вчерашнее),
- * а самый свежий хвост — не старше CATCH_UP_SEC.
+ * За один опрос играется ОДНА строка — самая свежая из пришедших после курсора. Остальные
+ * не копятся: смысл требования «остался только последний ответ», а не «прочитай всё, что
+ * накопилось, пока телефон молчал». Курсор при этом продвигается по всем событиям, иначе
+ * телефон зациклился бы на одной и той же строке.
+ *
+ * Про возраст решение одно: при *включении* динамика догоняем не всю ленту (иначе телефон
+ * начал бы читать вчерашнее), а самый свежий хвост — не старше CATCH_UP_SEC.
  */
 export function startFeedWatcher(
   base: string,
@@ -148,10 +145,18 @@ export function startFeedWatcher(
   let ticking = false
   let seeded = false
 
-  const play = (event: TtsFeedEvent): void => {
-    if (event.id) {
-      onEvent(event)
+  /** Курсор за всеми, играем последнего с id; null — если свежее cutoff ничего нет. */
+  const takeNewest = (events: TtsFeedEvent[], cutoff: number): TtsFeedEvent | null => {
+    let newest: TtsFeedEvent | null = null
+    for (const event of events) {
+      if (event.ts > cursor) {
+        cursor = event.ts
+      }
+      if (event.ts > cutoff && event.id) {
+        newest = event
+      }
     }
+    return newest
   }
 
   const seed = async (): Promise<void> => {
@@ -160,16 +165,11 @@ export function startFeedWatcher(
       return
     }
     cursor = serverNow ?? Date.now() / 1000
-    const cutoff = cursor - CATCH_UP_SEC
-    for (const event of events) {
-      if (event.ts > cursor) {
-        cursor = event.ts
-      }
-      if (event.ts > cutoff) {
-        play(event)
-      }
-    }
+    const newest = takeNewest(events, cursor - CATCH_UP_SEC)
     seeded = true
+    if (newest) {
+      onEvent(newest)
+    }
   }
 
   const tick = async () => {
@@ -183,11 +183,18 @@ export function startFeedWatcher(
         return
       }
       const { events } = await fetchFeed(base, cursor)
-      for (const event of events) {
-        if (event.ts > cursor) {
-          cursor = event.ts
-        }
-        play(event)
+      // Проверить пришлось ПОСЛЕ запроса: выключили, пока он летел, — и опоздавший
+      // ответ всё равно заиграл бы. Это второй путь, которым «выключенный» телефон
+      // говорил.
+      if (stopped) {
+        return
+      }
+      // Строже курсора: мост и так отдаёт только свежее `since`, но полагаться на чужой
+      // фильтр нельзя — иначе повтор того же события заставит телефон читать один и тот
+      // же ответ дважды.
+      const newest = takeNewest(events, cursor)
+      if (newest) {
+        onEvent(newest)
       }
     } finally {
       ticking = false
@@ -205,8 +212,9 @@ export function startFeedWatcher(
   }
 }
 
+/**
+ * Тишина по первому тапу: гасит звучащее. Очереди, которую надо было бы чистить, больше нет.
+ */
 export function stopPlayback(): void {
-  series += 1
-  queue = Promise.resolve()
   stopAudio()
 }

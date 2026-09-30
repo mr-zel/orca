@@ -6,10 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
  * Both come for free from the host the user already paired with, so a wrong guess here is a
  * speaker button that plays nothing at all and says nothing about why.
  */
-const { playAudioUrl } = vi.hoisted(() => ({ playAudioUrl: vi.fn(async () => true) }))
+const { playAudioUrl, stopAudio } = vi.hoisted(() => ({
+  playAudioUrl: vi.fn(async () => true),
+  stopAudio: vi.fn()
+}))
 vi.mock('../../modules/orca-tts-player/src', () => ({
   playAudioUrl,
-  stopAudio: vi.fn(),
+  stopAudio,
   isTtsPlayerAvailable: () => true
 }))
 
@@ -132,9 +135,9 @@ describe('watching the engine feed', () => {
     expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual(['now-c'])
   })
 
-  it('plays every line the engine sends, however long the pocket was shut', async () => {
-    // Nothing is dropped after the cursor: the engine decides what to say, the phone only
-    // refuses to reread history from before it was switched on.
+  it('reads only the freshest of what piled up while the pocket was shut', async () => {
+    // Nothing queues behind it: one answer the user might still want, not a backlog to
+    // sit through. The cursor still moves past everything, or the phone would loop.
     const t0 = Date.now() / 1000
     const backlog = [
       { ts: t0 + 60, id: 'while-asleep-a' },
@@ -147,7 +150,8 @@ describe('watching the engine feed', () => {
       }
       calls += 1
       // Первый ответ — разметка ленты при включении (часы движка = t0), второй — опрос
-      // после получаса в кармане: обе строки вышли позже курсора, значит обе играем.
+      // после получаса в кармане: обе строки вышли позже курсора, но играем только
+      // самую свежую, за остальной backlog телефон не держат.
       const nowSec = calls === 1 ? t0 : t0 + 3600
       const events = calls === 1 ? [] : backlog
       const date = new Date(nowSec * 1000).toUTCString()
@@ -162,11 +166,36 @@ describe('watching the engine feed', () => {
     await vi.waitFor(() => expect(calls).toBe(1))
     await vi.advanceTimersByTimeAsync(3000)
     await vi.waitFor(() => expect(calls).toBeGreaterThanOrEqual(2))
+    await vi.advanceTimersByTimeAsync(3000)
     watcher.stop()
-    expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual([
-      'while-asleep-a',
-      'while-asleep-b'
-    ])
+    expect(onEvent.mock.calls.map((call) => call[0].id)).toEqual(['while-asleep-b'])
+    // Курсор ушёл за обе строки: иначе следующий опрос принёс бы тот же хвост, и телефон
+    // зациклился бы на одном и том же ответе.
+    const thirdCallUrl = String(fetchMock.mock.calls[2]?.[0] ?? '')
+    expect(thirdCallUrl).toContain(`since=${t0 + 1800}`)
+  })
+
+  it('says nothing when the speaker was switched off while the poll was in flight', async () => {
+    let resolveFeed: (value: unknown) => void = () => {}
+    const feedPending = new Promise((resolve) => {
+      resolveFeed = resolve
+    })
+    const date = new Date(Date.now()).toUTCString()
+    fetchMock.mockImplementation(async () => {
+      await feedPending
+      return {
+        ok: true,
+        headers: { get: (name: string) => (name === 'date' ? date : null) },
+        json: async () => ({ events: [{ ts: Date.now() / 1000 + 5, id: 'opozdalo' }] })
+      }
+    })
+    const onEvent = vi.fn()
+    const watcher = startFeedWatcher(base, onEvent)
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    watcher.stop()
+    resolveFeed(null)
+    await Promise.resolve()
+    expect(onEvent).not.toHaveBeenCalled()
   })
 
   it('reads the whole feed back for the last utterance', async () => {
@@ -177,16 +206,18 @@ describe('watching the engine feed', () => {
   })
 })
 
-describe('switching the speaker off', () => {
+describe('one message at a time', () => {
   const base = 'http://10.0.0.5:3457'
 
   afterEach(() => {
     playAudioUrl.mockReset()
+    stopAudio.mockReset()
   })
 
-  it('never starts what the queue still holds', async () => {
-    // The engine cuts a long answer into chunks, so one answer is several queue items while
-    // the first one is still sounding. Tapping the crossed speaker must end the whole answer.
+  it('sends the new utterance straight to the player instead of lining it up', async () => {
+    // The old queue was the bug: everything waiting behind the sounding piece kept playing
+    // after the speaker was crossed off. There is no queue to clear now, so a fresh answer
+    // reaches the player the moment it arrives and simply cuts what sounded before it.
     let releaseFirst: () => void = () => {}
     const firstSounding = new Promise<void>((resolve) => {
       releaseFirst = resolve
@@ -200,14 +231,18 @@ describe('switching the speaker off', () => {
 
     void playWavById(base, 'chunk-1')
     const second = playWavById(base, 'chunk-2')
-    const third = playWavById(base, 'chunk-3')
-    await vi.waitFor(() => expect(playAudioUrl).toHaveBeenCalledTimes(1))
-
-    stopPlayback()
+    await expect(second).resolves.toBe(true)
+    expect(playAudioUrl.mock.calls.map((call) => call[0])).toEqual([
+      `${base}/wav?id=chunk-1`,
+      `${base}/wav?id=chunk-2`
+    ])
     releaseFirst()
+  })
 
-    await expect(second).resolves.toBe(false)
-    await expect(third).resolves.toBe(false)
-    expect(playAudioUrl).toHaveBeenCalledTimes(1)
+  it('puts the player down on the tap', () => {
+    playAudioUrl.mockImplementation(() => new Promise(() => {}))
+    void playWavById(base, 'chunk-1')
+    stopPlayback()
+    expect(stopAudio).toHaveBeenCalled()
   })
 })
