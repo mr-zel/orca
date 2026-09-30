@@ -50,6 +50,8 @@ export function MobileSessionTtsButton({ hostId }: { hostId: string | null | und
     watcherRef.current?.stop()
     watcherRef.current = null
     if (mode !== 'on' || !base) {
+      // Перечёркнутый динамик = тишина здесь и сейчас, а не «договорить очередь».
+      stopPlayback()
       return
     }
     watcherRef.current = startFeedWatcher(base, (event) => {

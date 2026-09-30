@@ -13,7 +13,8 @@ vi.mock('../../modules/orca-tts-player/src', () => ({
   isTtsPlayerAvailable: () => true
 }))
 
-const { VOICE_BRIDGE_PORT, playLast, startFeedWatcher, voiceBaseUrl } = await import('./tts-client')
+const { VOICE_BRIDGE_PORT, playLast, playWavById, startFeedWatcher, stopPlayback, voiceBaseUrl } =
+  await import('./tts-client')
 
 describe('the voice base address', () => {
   it('is the bridge port on the paired host, from a ws endpoint', () => {
@@ -173,5 +174,40 @@ describe('watching the engine feed', () => {
     await expect(playLast(base)).resolves.toBe(true)
     expect(fetchMock).toHaveBeenCalledWith(`${base}/api/feed?since=0`, expect.anything())
     expect(playAudioUrl).toHaveBeenLastCalledWith(`${base}/wav?id=just-now`)
+  })
+})
+
+describe('switching the speaker off', () => {
+  const base = 'http://10.0.0.5:3457'
+
+  afterEach(() => {
+    playAudioUrl.mockReset()
+  })
+
+  it('never starts what the queue still holds', async () => {
+    // The engine cuts a long answer into chunks, so one answer is several queue items while
+    // the first one is still sounding. Tapping the crossed speaker must end the whole answer.
+    let releaseFirst: () => void = () => {}
+    const firstSounding = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    playAudioUrl.mockImplementation(async (url: string) => {
+      if (String(url).includes('chunk-1')) {
+        await firstSounding
+      }
+      return true
+    })
+
+    void playWavById(base, 'chunk-1')
+    const second = playWavById(base, 'chunk-2')
+    const third = playWavById(base, 'chunk-3')
+    await vi.waitFor(() => expect(playAudioUrl).toHaveBeenCalledTimes(1))
+
+    stopPlayback()
+    releaseFirst()
+
+    await expect(second).resolves.toBe(false)
+    await expect(third).resolves.toBe(false)
+    expect(playAudioUrl).toHaveBeenCalledTimes(1)
   })
 })

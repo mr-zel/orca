@@ -92,8 +92,16 @@ async function fetchFeed(
 // ответы приходят подряд кусками — без серии по очереди голос сам себя перебивает.
 let queue: Promise<unknown> = Promise.resolve()
 
-function enqueue<T>(task: () => Promise<T>): Promise<T> {
-  const run = queue.then(task, task)
+// Номер серии. Тап по перечёркнутому динамику поднимает его — и всё, что ещё не
+// успело начаться, уже не начнётся. Без этого выключенный телефон «договаривает»
+// очередь: движок нарезает длинный ответ на куски по 600 символов, и каждый кусок —
+// отдельное событие ленты, уже стоящее в очереди.
+let series = 0
+
+function enqueue(task: () => Promise<boolean>): Promise<boolean> {
+  const mine = series
+  const guarded = (): Promise<boolean> => (mine === series ? task() : Promise.resolve(false))
+  const run = queue.then(guarded, guarded)
   queue = run.then(
     () => undefined,
     () => undefined
@@ -198,6 +206,7 @@ export function startFeedWatcher(
 }
 
 export function stopPlayback(): void {
+  series += 1
   queue = Promise.resolve()
   stopAudio()
 }
