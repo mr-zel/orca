@@ -68,22 +68,6 @@ async function playWav(base: string, id: string): Promise<boolean> {
   return playAudioUrl(`${base}/wav?id=${encodeURIComponent(id)}`)
 }
 
-/** Разовая озвучка произвольного текста: движок синтезирует и отдаст тот же WAV. */
-export function speakText(base: string, text: string): Promise<boolean> {
-  const clean = text.trim().slice(0, 1200)
-  if (!clean) {
-    return Promise.resolve(false)
-  }
-  return enqueue(async () => {
-    const body = await fetchJson<{ id?: string }>(`${base}/api/say`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: clean })
-    })
-    return body?.id ? playWav(base, body.id) : false
-  })
-}
-
 /** Озвучить последнее высказывание в ленте движка — «я пропустил, прочитай». */
 export function playLast(base: string): Promise<boolean> {
   return enqueue(async () => {
